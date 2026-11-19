@@ -20,6 +20,8 @@ public class SlapBodyBake : MVRScript
         RegisterFloat(intensity);
         CreateSlider(intensity);
         CreateButton("Capture current pose + bake V3").button.onClick.AddListener(Bake);
+        CreateButton("Capture current pose + bake PalmSweep V4").button.onClick.AddListener(() => BakeVersion(true));
+        CreateButton("Capture contact palm + export V5").button.onClick.AddListener(CapturePalm);
         CreateButton("Enable required controller channels").button.onClick.AddListener(EnableControls);
     }
 
@@ -28,6 +30,55 @@ public class SlapBodyBake : MVRScript
         FreeControllerV3 c = containingAtom.GetStorableByID(id) as FreeControllerV3;
         if (c == null) throw new Exception("Missing controller: " + id);
         return c;
+    }
+
+    private void CapturePalm()
+    {
+        try
+        {
+            if (containingAtom.uid != "Person#2") throw new Exception("Load on Person#2.");
+            Atom reference = SuperController.singleton.GetAtomByUid("SlapReference_Person2");
+            if (reference == null) throw new Exception("Create the reference first.");
+            Quaternion palm = Quaternion.Inverse(reference.mainController.transform.rotation)
+                * Control("rHandControl").transform.rotation;
+            string input = Output.Replace("FullBody_V3", "FullBody_PalmSweep_V4");
+            JSONClass data = SuperController.singleton.LoadJSON(input).AsObject;
+            foreach (JSONClass clip in data["Clips"].AsArray)
+            {
+                JSONClass hand = null;
+                foreach (JSONClass target in clip["Controllers"].AsArray)
+                    if (target["Controller"].Value == "rHandControl") hand = target;
+                if (hand == null || hand["Parent"]["Atom"].Value != reference.uid)
+                    throw new Exception("Expected V4 hand track on the reference handle.");
+                string[] axes = { "RotX", "RotY", "RotZ", "RotW" };
+                Quaternion contact = Quaternion.Euler(0f, 0f, -90f); // V4 authored contact pose
+                for (int i = 0; i < hand["RotX"].AsArray.Count; i++)
+                {
+                    float[] v = new float[4];
+                    for (int j = 0; j < 4; j++)
+                        v[j] = float.Parse(hand[axes[j]][i]["v"].Value, CI);
+                    Quaternion relative = new Quaternion(v[0], v[1], v[2], v[3]) * Quaternion.Inverse(contact);
+                    Quaternion result = Quaternion.Slerp(Quaternion.identity, relative, .20f) * palm;
+                    for (int j = 0; j < 4; j++)
+                        hand[axes[j]][i]["v"] = result[j].ToString("R", CI);
+                }
+                JSONArray retained = new JSONArray();
+                foreach (JSONClass param in clip["FloatParams"].AsArray)
+                {
+                    string name = param["Name"].Value;
+                    if (param["Storable"].Value == "geometry" && (name == "Right Fingers Fist"
+                        || name == "Right Fingers Grasp" || name == "Right Fingers In-Out"
+                        || name == "Right Thumb In-Out")) continue;
+                    retained.Add(param);
+                }
+                clip["FloatParams"] = retained;
+                clip["AnimationName"] = clip["AnimationName"].Value.Replace("PalmSweep_V4", "CalibratedPalm_V5");
+            }
+            string path = input.Replace("PalmSweep_V4", "CalibratedPalm_V5");
+            SuperController.singleton.SaveJSON(data, path);
+            status.val = "Palm captured. Import " + path + ". Keep your scene finger pose.";
+        }
+        catch (Exception e) { status.val = "Palm capture failed: " + e.Message; }
     }
 
     // Hermite smoothstep phases with zero derivative at preparation/recovery extremes.
@@ -47,6 +98,11 @@ public class SlapBodyBake : MVRScript
 
     private void Bake()
     {
+        BakeVersion(false);
+    }
+
+    private void BakeVersion(bool palmSweep)
+    {
         try
         {
             if (containingAtom.uid != "Person#2") throw new Exception("Load this tool on Person#2.");
@@ -59,7 +115,9 @@ public class SlapBodyBake : MVRScript
             }
             Atom reference = SuperController.singleton.GetAtomByUid("SlapReference_Person2");
             if (reference == null) throw new Exception("Create SlapReference_Person2 first using SlapReferenceSetup.");
-            JSONClass data = SuperController.singleton.LoadJSON(Input).AsObject;
+            string inputPath = palmSweep ? Input.Replace("All_3_RightToLeft_Arc_V2", "All_3_PalmSweep_V4") : Input;
+            string outputPath = palmSweep ? Output.Replace("FullBody_V3", "FullBody_PalmSweep_V4") : Output;
+            JSONClass data = SuperController.singleton.LoadJSON(inputPath).AsObject;
             if (data == null || data["Clips"].AsArray == null) throw new Exception("V2 input file was not found.");
             FreeControllerV3 chest = Control("chestControl");
             FreeControllerV3 shoulder = Control("rShoulderControl");
@@ -109,9 +167,9 @@ public class SlapBodyBake : MVRScript
                 controllers.Add(shoulderTrack);
                 controllers.Add(elbowTrack);
             }
-            SuperController.singleton.SaveJSON(data, Output);
-            status.val = "Baked 3 V3 clips from CURRENT pose.\nImport: " + Output
-                + "\nEnable required controller channels, then play a FullBody_V3 clip."
+            SuperController.singleton.SaveJSON(data, outputPath);
+            status.val = "Baked 3 clips from CURRENT pose.\nImport: " + outputPath
+                + "\nEnable required controller channels, then play the imported clip."
                 + "\nHand still follows the draggable head-linked reference. For major direction/pose changes, pause and bake again."
                 + "\nDo not run another layer on chest/right shoulder/right elbow.";
         }
